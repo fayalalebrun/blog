@@ -1,0 +1,185 @@
+#+DATE: <2020-04-15 wo>
+#+TITLE: Making a peer-to-peer multiplayer game - OpenRISK
+#+OPTIONS: toc:nil num:0 \n:true
+#+STARTUP: showall indent
+#+STARTUP: hidestars
+#+BEGIN_export html
+#+END_export
+
+#+ATTR_HTML: :alt OpenRISK logo
+[[./assets/openrisk_logo.svg]]
+
+Play [[http://open-risk.herokuapp.com][OpenRISK]]
+
+* Introduction
+I have never used JavaScript before now. The main reason for this is that I, like many others, always wrote it off as being a [[https://web.mit.edu/humor/Computers/real.programmers]["Quiche"]] language, in the same vein as Python, Scratch, and Visual Basic. I still think this idea has some merit, but after considering how prevalent JavaScript is in the web I decided to take the plunge and learn it.
+
+Now, I hear you getting up from your seat and hollering, /What is this quiche!/, but bear with me, as I did not do this without first having been subject to utmost coercion of the worst type. By this I mean, much like my last project, Kapow, I did this as part of my university education. We had to make a simple board game, but as usual, I went slightly overboard.
+
+* The Idea
+One day, I was playing a game of /Risk/ with two of my friends. As my vast army invaded Europe from America, a single thought crept into my mind,
+
+/You know what could make this better?/
+
+/Emacs?/
+
+/No, if it was on a computer and had multiplayer!/
+
+Now, looking back at this it turns out it's not really better to play /Risk/ in front of a screen instead of with your friends. But I did not realize that until I had finished the game.
+
+* The Source Code
+The entire source code for this project is available on [[https://github.com/fayalalebrun/OpenRISK][Github]].
+
+If you're looking at the directory of the project, you better head over to ~public/scripts~, that's where all of the significant client-side code is stored. The entry point for the game is in ~public/play.js~.
+
+* Peer to Peer Multiplayer
+
+So the game is technically not peer to peer, as the server is used as a relay to pass messages from client to client. However, it practically functions as peer to peer. The main mechanisms to communicate from client to client are defined in ~multiplayer/playerEventSource.js~.
+
+#+BEGIN_SRC js
+export class PlayerEventSource{
+
+    /**
+     * 
+     * @param {function} callback Will be called whenever an event is fired. 
+     */
+    constructor(callback){
+	this.callback = callback;
+    }
+
+    /**
+      * @abstract 
+      */
+    sendMessage(msg){}
+
+    //returns whether client should disconnect.
+    onPlayerLeftGame(id){
+	return true;
+    }
+}
+#+END_SRC
+
+
+Put into words, this is an interface that defines a ~callback~ to be called when a message is received and a method ~sendMessage~ which is used to send a message (More specifically a JavaScript object) to every other peer.
+
+The actual implementation of this is located in ~multiplayer/webSocketPlayerEventSource.js~.
+
+#+BEGIN_SRC js
+export class WebSocketPlayerEventSource extends PlayerEventSource {
+    constructor(callback, socket){
+	super(callback);
+	this.socket = socket;
+	setTimeout(()=>{socket.send(JSON.stringify({heartbeat:true}))},500);
+	socket.onmessage = ((event)=>{
+	    let msg = JSON.parse(event.data);
+	    if(msg.playerMessage){
+		callback(msg.playerMessage);
+	    } else if (msg.playerLeftGame!=undefined) {
+		console.log('Player left game, closing socket');
+		if(this.onPlayerLeftGame(msg.playerLeftGame)){		  
+		    socket.close();
+		}
+		
+	    } else if(msg.heartbeat){
+		setTimeout(()=>{socket.send(JSON.stringify({heartbeat:true}))},5000);
+
+		
+	    } else {
+		console.log('Received non-supported message: ');
+		console.log(msg);
+	    }
+	});
+    }
+
+
+
+    sendMessage(msg){
+	this.socket.send(JSON.stringify({playerMessage:msg}));
+    }
+}
+#+END_SRC
+
+** The State Machine
+If you're familiar with the game of /Risk/, you might know that a game consists of several stages, with placing units, fortifying, attacking, etc. Many /Risk/ implementations on the net get around this by modifying the rules to allow players to perform all of these actions at the same time.
+
+Here is a diagram which shows all of these actions in a type of state graph:
+
+#+ATTR_HTML: :alt State diagram.
+[[./assets/openrisk-state.jpg]]
+
+All of this must be done for every player, until a winner is found.
+
+When looking at this, first I recognized how in each state the actions which might be taken by the user are greatly distinct. Due to this, I decided to compartmentalize the code, as I thought it would be much easier to handle (And it was).
+
+This brings me to the next interface, at ~game/stage_handling/stageHandler.js~:
+
+#+BEGIN_SRC js
+export class StageHandler {
+    
+    /**
+     * @abstract 
+     */
+    static onPlayerEvent(event){}    
+
+    /**
+     * @abstract 
+     */
+    static handleInput(currPlayer, zone, mapView, game){}
+
+    
+    /**
+     * @abstract 
+     */
+    static select(){}    
+}
+#+END_SRC
+
+Looking back, it would have been much better to name this a StateHandler, but I went with the aforementioned name, mainly because it didn't occur to me I was working with a state machine at that time.
+
+In this class, I have three main methods. The third method ~select~ simply acts as an initializer, called when that state is called. The second method, ~handleInput~, is called when the user clicks on a zone on the map. This method is only relevant when it is the user's turn, so usually it has no effect if this is not the case.
+
+** Propagating changes
+So ~handleInput~ sends out server commands, but it doesn't actually make any change to the state of the game. Instead, it makes sure this command is also sent to the client itself. Thus, the change is done on all clients simultaneously, and all of them remain in sync.
+
+#+ATTR_HTML: :alt OpenRISK game board
+[[./assets/openrisk-board-screen1.png]]
+
+Another advantage to this, is that it was unnecessary to create code to handle changes coming from the client and from other clients separately. Everything is treated as a request.
+
+** Keeping dice rolls in sync
+A dice roll, as you know, is random, and /Risk/ involves many dice rolls, mainly during combat. Now, if you just tried to use the JavaScript built-in random function, you would find you would have a different result every time. Normally this is intended, as who would want a random function with predictable results? However, in a peer-to-peer multiplayer game, if each player has a random function which produces different results, the game will very soon desync, as each player will for example think every battle to have a different result.
+
+This is where /seeds/ are useful. These are numbers we can use to "seed" the random function in order to produce predictable results. So we generate a random seed in one of the clients and then propagate it to the other clients.
+
+However, JavaScript does not have this functionality by default, you are unable to seed the random function. Due to this, I used [[https://github.com/davidbau/seedrandom][David Bau's seedrandom.js library]], and that provides the functions we need for this.
+
+* Clicking on territories
+The question I often get when other developers look at my game is "How did you get the territory clicking to work?" Well, the answer is simple. I store two different map images. One is the image I actually use in the game, and the other I use as an aid to separate the different areas. In another JSON file I store what color corresponds to which territory.
+
+#+ATTR_HTML: :alt OpenRISK map
+[[./assets/map.svg]]
+
+#+ATTR_HTML: :alt OpenRISK map zones
+[[./assets/map_zones.svg]]
+
+The algorithm whenever a player clicks basically looks as follows:
+
+1. Render the area-defining image to an off-screen canvas.
+2. Check the color of the pixel at the mouse position.
+3. Find out what territory the color belongs to, via a map.
+4. Pass this information to the state handler, for further processing.
+
+** Highlighting zones
+The zone highlighting is also an interesting topic. Like with the selecting, I also leverage this image containing different colors per zone. This time, my objective is to build a dictionary of images for each one of the territories. I do this via two passes over the source image:
+
+1. For each zone, find out where its highest pixel is as well as its lowest pixel. From this, it is possible to know large the image has to be.
+2. For each pixel on the map, depending on the size decide to which zone it corresponds to, if any.
+
+With the pixel data now available for each zone, the image for each zone is then constructed.
+
+Now that the images are available to me, I can simply change their color and draw them over the map. Thus achieving the highlighting effect.
+
+* Conclusion
+The best part about this project was probably doing the zone highlighting routine, as I used another method before which was 200 times slower. So it was very satisfying to see the difference in loading time.
+
+I am very pleased with how the project turned out, as I managed to implement all of the features of RISK that I initially set out to do.

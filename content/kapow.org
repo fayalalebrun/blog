@@ -1,0 +1,646 @@
+#+DATE: <2020-03-07 za>
+#+TITLE: Kapow - Making a Game in Real-Mode x86 Assembly
+#+BEGIN_export html
+
+#+END_export
+* Introduction
+/Kapow/ is a remake of /Kaboom!/ (1981) for the Atari 2600. It is made to run on an x86 machine without an operating system, and does so exclusively in 16 bit real-mode. It was originally made as a bonus assignment for the class CSE1400 at TU Delft. The source code is available at [[https://github.com/fayalalebrun/kapow][Github]].
+
+#+BEGIN_export html
+<img src="https://media.giphy.com/media/gg2ntyu3R7a5IJhWBc/giphy.gif" style="margin-bottom:2vh;"/>
+#+END_export
+** Assumptions
+In these posts, I will assume that you grasp the basics of either x86 assembly or some other assembly language, and thus I won't spend any time explaining this.
+** Tooling
+- [[https://nasm.us/][NASM]]: Assembler used to transform the source into binary.
+- [[https://www.qemu.org/][QEMU]]: x86 Emulator used in order to run and debug the program.
+- [[https://www.dosbox.com/][DOSBox]]: DOS emulator used in order to run /Deluxe Paint/, which was needed to create Mode 13h compatible assets.
+** Program Structure
+*** Bootloader
+This is the part of the program which takes care of setting the correct video mode, loading the data into memory, setting the correct timer rate, and finally jumping into the main program.
+- Related files: bootup/booter.asm
+*** Initialization and main loop
+Here all of the game's subsystems are started, and the main loop can be found at *timer_irq*
+- Related files: game/game.asm
+*** Stage Handling
+Depending on the current state of the game, different things must be rendered, and likewise the player's input must be handled differently. This part takes care of these two things for each stage, providing initialization and main loops for each stage.
+- Related files: game/stage.asm
+*** Logic
+Checks for collisions between paddle and bombs, updates the bomber and bombs. Handles paddle player input.
+- Related files: game/paddle.asm, game/bombs.asm, game/bomber.asm, game/collision\under{}detection.asm
+*** Sound
+Handles playing of simple PC Speaker sounds and does so with the correct duration.
+- Related files: game/sound.asm
+*** Renderer
+Contains all of the functions for rendering basic things like sprites to the screen, as well as takes care of rendering all of the elements of the game.
+- Related files: game/renderer.asm, game/2dgfx.asm
+*** Input handling
+Keeps track of whether a key is pressed at any given moment, for other functions to employ.
+- Related files: game/keyboard.asm
+*** Score keeping
+Continually updates the score, as well as the top score, using both a doubleword and BCD format.
+- Related files: game/score.asm
+*** Animation system
+Creates and continually updates the explosion animations on screen.
+- Related files: game/explosion.asm
+*** Game constants and variables
+Keeps track of game constants and the location of various variables, as well as the location of sprites.
+- Related files: game/game\under{}constants.asm, game/var\under{}locs.asm, game/sprite\under{}constants.asm
+* 16 bit Assembly in a Modern Assembler
+Nowadays, most x86 Assembly programs are intended to run in 64 bit or at least 32 bit environments. This means that most features specific to 16 bit development are now no longer supported. Thus, some workarounds related to this were needed in the development of /Kapow/.
+
+** What is Real Mode?
+Whenever your x86 cpu boots up, it always starts up in [[https://wiki.osdev.org/Real_Mode][Real Mode]]. In this mode, your cpu has access to only 16 bit instructions and registers, as well as one megabyte of RAM. In other words, the CPU behaves like an [[https://en.wikipedia.org/wiki/Intel_8086][1978 Intel 8086]] with a much higher clock speed.
+
+** Memory Segmentation 
+You might notice that in Real Mode we have access to a whole megabyte of RAM, but yet we are using 16 bit registers to address it. How is it possible to address one million bytes, if in 16 bits we can only represent 64 thousand distinct values? The answer to this question lies in Intel's solution to this problem, [[https://wiki.osdev.org/Segmentationhttps://wiki.osdev.org/Segmentation][Memory Segmentation]]. This is where another register is used to represent an additional 4 bits for addressing. This gives us a total of 20 bits, enough to address one megabyte. In this model, every 64 kilobytes of RAM is referred to as one segment.
+
+** Addressing Labels
+The main problem with using NASM in 16 bit code starts when you are trying to modify the value at a certain label. For example, consider the following code:
+
+#+BEGIN_SRC nasm
+var: dw 0x123
+mov ax, [var]
+mul 20
+mov [var], ax
+#+END_SRC
+
+Normally, you would expect this to work. You could use the location at ~var~ effectively as a variable, addressing and using its contents. However, when dealing with 16 bit code NASM refuses to do this. [[https://www.nasm.us/doc/nasmdoc3.html][Upon further digging]], it seemed possible to use ~seg~ in order to load the segment of the label, and from this be able to address. But this is impossible to do without using Microsoft ~COM~ files. Thus, in order to preserve the debugging advantages of using a modern ELF format, I had to find another solution.
+
+** Bootlegged Effective Addressing
+In order to solve this problem, it was necessary to define an area in memory where variables would be stored. This was done in the ~game/var_locs.asm~ file. Here, a base offset is defined, in this case ~0xC000~ (Which is an offset from the beginning of the segment where the game's executable resides), and subsequently the location of every single variable used by the game is defined. This also necessitates the initialization of each defined memory location, which is done in the respective file where the variables are used.
+
+** Loading Sprites
+The easiest solution to loading and using sprites would be something like this:
+#+BEGIN_SRC nasm
+sprite: incbin "./mysprite.bin"
+mov ax, seg sprite ; Moves the segment the sprite is in to ax
+mov es, ax
+mov ax, sprite
+call my_draw_routine
+#+END_SRC
+However, due to the aforementioned problems, this is simply not possible. Instead, a similar approach must be taken to the one used with variables, and the locations used are stored within the file ~game/sprite_constants.asm~. This time, the sprites are stored and loaded in a different segment.
+
+In order to do this, the first thing that is done is to fill up the rest of the code segment with 0's. This is done with the following line in ~/game/game.asm~:
+
+#+BEGIN_SRC nasm
+times 0xFFFF - ($-$$) db 0
+#+END_SRC
+
+Doing this greatly aids in the loading process, as we know where the sprites are going to be, exactly 64 kilobytes from the start of the code segment, or in other words in the following segment.
+
+The ~Makefile~ then takes care of writing the assets to the binary executable, as can be seen from this snippet:
+#+BEGIN_SRC makefile
+assets:
+	mkdir -p out/assets
+	gcc -o out/extract_palette.o src/assets/extract_palette.c
+	$(CONV) -compress none assets/PALETTE.PCX out/assets/PALETTE.bmp
+	out/extract_palette.o out/assets/PALETTE.bmp out/assets/palette.bin
+	cat out/assets/palette.bin >> out/HD.img
+
+
+	gcc -o out/conv_asset.o src/assets/conv_asset.c
+	$(call add_asset,BOMB,16,32)
+	$(call add_asset,BOMB8S,8,8)
+	$(call add_asset,BOMBER,32,32)
+	$(call add_asset,PADDLE,32,8)
+	$(call add_asset,CHAR0,12,12)
+	$(call add_asset,CHAR1,12,12)
+	$(call add_asset,CHAR2,12,12)
+	$(call add_asset,CHAR3,12,12)
+	$(call add_asset,CHAR4,12,12)
+	$(call add_asset,CHAR5,12,12)
+	$(call add_asset,CHAR6,12,12)
+	$(call add_asset,CHAR7,12,12)
+	$(call add_asset,CHAR8,12,12)
+	$(call add_asset,CHAR9,12,12)
+	$(call add_asset,TOPSC,40,12)
+	$(call add_asset,EXP1,8,8)
+	$(call add_asset,EXP2,8,8)
+	$(call add_asset,EXP3,8,8)
+	$(call add_asset,EXP4,8,8)
+	$(call add_asset,CHALKBOA,100,32)
+	$(call add_asset,ENTER,96,20)
+#+END_SRC
+
+Finally, upon booting, ~bootup/booter.asm~ takes care of loading all of the sprite data at the correct segment, where ~asset_storage~ is the segment where sprites are to be loaded to. This can be seen here:
+#+BEGIN_SRC nasm
+	mov ax, asset_storage
+	mov es, ax
+	mov ah, 0x2
+	mov al, 128
+	mov ch, 0
+	mov dh, 2
+	mov cl, 4
+	mov dl, 0x80
+	
+	mov bx, 0		; address to copy to
+	int 0x13
+#+END_SRC
+
+* Bootloader
+When making an operating system, or a bootable game like /Kapow/, the [[https://wiki.osdev.org/Bootloader][Bootloader]] is the first piece of code to run, and is responsible for loading the rest of the program (Or Kernel in the case of an OS) to memory.
+
+** The Booting Process
+Whenever you start your computer from a storage device, such as a hard drive or a floppy disk, the BIOS loads the first 512 bytes in the storage medium into memory, at address ~0x7c00~. From there, the loaded program can start executing instructions.
+
+** /Kapow/'s Bootloader
+/Kapow/'s bootloader is entirely contained in the file ~bootup/booter.asm~. Excluding a few parts that will be explained in their respective components, I will now detail its general operation.
+
+It first loads the rest of the executable in the following way:
+#+BEGIN_SRC nasm
+	mov ax, game_start
+	mov es, ax		; segment address to copy to
+	mov ah, 0x2 		; read sectors from drive
+	mov al, 128		; amount of sectors to read
+	mov ch, 0		; cylinder
+	mov dh, 0		; head
+	mov cl, 2		; sector
+	mov dl, 0x80		; disk
+
+	mov bx, 0		; address to copy to
+	int 0x13
+#+END_SRC
+
+Then, it sets up the [[https://wiki.osdev.org/PIT][PIT]], to call its interrupt approximately 100 times every second. This is done in the following way
+#+BEGIN_SRC nasm
+
+        mov al,00110100b                  ;channel 0, lobyte/hibyte, rate generator
+	out 0x43, al
+	
+	mov ax,PIT0_reload	         ;ax = 16 bit reload value
+	out 0x40,al                       ;Set low byte of PIT reload value
+	mov al,ah                         ;ax = high 8 bits of reload value
+	out 0x40,al                       ;Set high byte of PIT reload value
+	
+#+END_SRC
+
+The bootloader will then place some pointer values into what is called the [[https://wiki.osdev.org/IVT][IVT]]. This is a table used in Real Mode in order to map [[https://en.wikipedia.org/wiki/Interrupthttps://en.wikipedia.org/wiki/Interrupt][interrupts]] to different subroutines. In other words, whenever an interrupt is fired, the CPU will execute the subroutine whose address is in that interrupt's entry in the IVT. The bootloader will hook in the game's timer IRQ function (Which is for all practical purposes the game loop) in the following way:
+#+BEGIN_SRC nasm
+	mov ax, game_start	
+	mov [cs:0x1c*4+2], ax	; move segment of game to IVT
+	mov ax, game_tirq
+	mov [cs:0x1c*4], ax	; move address of irq to IVT
+#+END_SRC
+
+* Renderer
+In the late 80's and early 90's, when Real Mode was still in widespread use, the most common piece of graphics hardware found on a PC was the [[https://wiki.osdev.org/VGA_Hardware][VGA Chip]]. To this day, practically every single GPU implements its functionality, and it is supported by most emulators, including QEMU. The card offers a variety of modes, but the most popular of them was the well-known [[https://en.wikipedia.org/wiki/Mode_13h][Mode 13h]].
+
+** Mode 13h
+Due to its relative ease of use through BIOS calls when in Real Mode, Mode 13h was chosen as the graphics mode for /Kapow/. It is easy to set by calling a BIOS interrupt in the following way:
+#+BEGIN_SRC nasm
+        mov ax, 0x13		
+	int 0x10		
+#+END_SRC
+As can be seen here, Mode 13h gets its name from the value put into ~ax~ to set it, 13 hexadecimal.
+*** Drawing
+Once this is done, the screen can be written to as a linear buffer, in the segment ~0xA0000~. The screen is sized at 320x200 pixels, taking up an entire segment of memory (64 kilobytes). Each byte represents a single pixel, the value of which is an index in the palette, which will be discussed later.
+
+Since this is a linear framebuffer, the following equation could be used in order to draw a pixel at a certain x and y in the screen.
+\begin{equation}
+o = x+y*320
+\end{equation}
+Where $o$ is the offset from ~0xA0000~ and $x$,$y$ are your desired coordinates.
+
+From this equation, a function like this could be used in order to write a single pixel to a desired location:
+#+BEGIN_SRC nasm
+; Draws a pixel on the screen
+; al - color
+; bx - x-coordinate
+; cx - y-coordinate
+put_pixel:
+	push bp
+	mov bp, sp
+
+	push ax
+	mov ax, 320
+	mul cx
+	add bx, ax
+	pop ax
+	
+	mov dx, 0xA000 ; This is used to set the segment register, so only the last 4 bits are of use.
+	mov gs, dx
+	mov [gs:bx], al
+	
+	mov sp, bp
+	pop bp
+	ret
+#+END_SRC
+*** The Palette
+As you might imagine, given that we are using one byte per pixel, that greatly limits the amount of color information we can use. If we were to use an RGB representation, for example, we would only have around 2.5 bits per component.
+
+In order to solve this, Mode 13h operates in something called indexed color mode, where the value of each byte represents not color information directly, but instead an index in an array of colors. By default, the BIOS loads some colors into the VGA chip, but if we want to use artwork of any quality, it is a good idea to customize the colors to our liking.
+
+Setting a color in the palette involves direct communication with the VGA card. This might sound complicated but in reality is quite simple. /Kapow/ implements this in the following way:
+#+BEGIN_SRC nasm
+; Sets an index in a palette to a color
+; ah - index
+; bl - red (0-63)
+; bh - green (0-63)
+; cl - blue (0-63)
+set_palette_index:
+	push bp
+	mov bp, sp
+	
+	mov al, 0xFF
+	mov dx, 0x3C6 		; PEL Mask Register
+	out dx, al		; Prepare VGA card for color change
+
+	mov al, ah
+	mov dx, 0x3C8		; PEL Address Write Mode Register
+	out dx, al		; Send what color index to write to
+
+	mov dx, 0x3C9		; PEL Data Register
+
+	mov al, bl
+	out dx, al
+
+	mov al, bh
+	out dx, al
+
+	mov al, cl
+	out dx, al
+
+	
+	
+	mov sp, bp
+	pop bp
+	ret
+#+END_SRC
+It is worth noting that when uploading colors into the palette, the VGA card only cares about the first 6 bits of the byte giving, discarding the last two. That is why their value is denoted as ~0-63~.
+
+So for example, if we were to set index 163 to a color of our liking, whenever 163 is encountered in a byte in our framebuffer, it would be drawn as the color we specified.
+
+*** VSync
+If you were to directly write to the framebuffer and had moving elements, you would notice severe screen tearing. This can be solved by buffering the contents of your screen before writing it to the VGA chip, and synchronizing it to your to the video signal, to ensure no writing is done while screen is being refreshed.
+
+To do this, you must first write the screen's contents to another segment, for example ~0x70000~, instead of directly to ~0xA0000~. Then, you can copy the contents of the temporary buffer to the actual framebuffer.
+
+But before you write to the VGA's memory, you must make sure that the screen is not currently being refreshed. This can be done by querying the VGA card, and waiting if this is the case. This can be done in the following way:
+#+BEGIN_SRC nasm
+vt_set:
+	in al, dx
+	and al, 8
+	jnz vt_set
+
+vt_clr:                  
+	in al, dx
+	and al, 8
+	jz vt_clr
+
+#+END_SRC
+
+After that, to perform the copying, a routine similar to this one could be used:
+#+BEGIN_SRC nasm
+copy_buffer:
+	push bp
+	mov bp, sp
+
+	mov cx, 0x7000
+	mov ds, cx
+	xor si, si             ;ds:si = source
+
+	mov cx, 0xa000
+	mov es, cx
+	xor di, di             ;es:di = destination
+	
+	mov cx, 32000    	;32k words to fill the screen
+	
+	mov dx, 0x3da           ; VGA status register
+
+	rep movsw
+	
+	mov sp, bp
+	pop bp
+	ret
+#+END_SRC
+** /Kapow/'s Renderer
+*** Drawing Sprites
+In a game, it is very important to be able to draw sprites. One might even say, it is imperative. In order to draw a sprite, /Kapow/ iterates through the sprite data and places pixel by pixel in the correct area. The value ~0xFF~ is taken as a transparent pixel and thus this value is not written. The code for this is as follows:
+#+BEGIN_SRC nasm
+; Draws a sprite
+; ax - y-position
+; bx - x-position
+; ch - width
+; cl - height
+; dx - sprite location
+draw_sprite:
+	push bp
+	mov bp, sp
+
+	push dx ; Save sprite location
+	mov dx, screen_width
+	mul dx ; Multiply y position with screen width (320), to get offset
+	add bx, ax ; Add offset to x, to get absolute start location
+
+	mov ax, vga_mem
+	mov es, ax
+	mov ax, sprite_seg
+	mov gs, ax ; Set up segments where transfers will occur. From sprite_seg to vga_mem
+		
+	pop ax ; Put saved sprite location in ax
+	xor dx, dx 
+	mov dl, cl ; Move height to dl
+
+	shr cx, 8 ; Shift cx right 8 places, effcetively putting width in cl
+	
+	
+	push cx ; Save width
+ds1:
+	push ax ; Save sprite location + offset
+	push bx ; Save current offset position
+	mov bx, ax ; Move sprite location to bx
+	mov al, [gs:bx] ; Move sprite's pixel value to al
+	pop bx ; Reload bx with offset positon
+	cmp al, 0xFF ; Check if pixel should be transparent
+	je dssk ; If so, don't place the pixel
+	mov [es:bx], al
+dssk:
+	pop ax ; Restore sprite location + offset
+	inc bx ; increase offset in gfx buffer
+	inc ax ; Increase sprite offset
+	
+	loop ds1 ; Continue looping until done with this row of pixels in sprite
+	dec dx ; One less row to go
+	cmp dx, 0 ; Check if all rows done
+	jz dsd ; Jump if done
+	pop cx ; Restore sprite width
+	push cx ; Save sprite width
+	add bx, screen_width ; Add screen width to the offset, going to the next row
+	sub bx, cx ; Subtract sprite width from bx, to arrive at the correct column
+
+	jmp ds1
+
+dsd:	pop cx
+
+	
+	
+	mov sp, bp
+	pop bp
+	ret
+
+#+END_SRC
+*** Drawing Animations
+How animations are drawn in /Kapow/ will be explained in more detail in a later post.
+
+* Creating Sprites for Mode 13h
+Sprite creation is normally a straight forward process. Draw some sprites in GIMP, export them, load them in. However, when making a bootloaded game in Assembly using Mode 13h, a few problems arise.
+
+** Problems
+- No available libraries means that if you want to support a certain file format, you have to write the procedures needed to convert that into something you can send to the framebuffer.
+- Mode 13h works in 256 indexed-color mode, which is not trivial to work with in something like GIMP.
+- Perhaps most importantly, Mode 13h does not provide square pixels. 320x200 is stretched into 4:3 aspect ratio. So what you would see in something like GIMP would not be the same as what is drawn onto the screen.
+
+** Asset production pipeline
+Making assets and preparing them for usage in /Kapow/ consists of three steps:
+- Creating graphics
+- Converting image to BMP
+- Converting BMP to easy-to-parse binary format.
+
+*** Creating graphics
+Graphics for /Kapow/ were created in a program called Deluxe Paint.
+
+[[./assets/dp_000.png]]
+
+
+Deluxe Paint was one of the most popular programs for sprite creation in the early 90's. In fact, it still accomplishes this quite well. It does not suffer from the problem of pixels having the incorrect aspect ratio, as the pixels are actually displayed in Mode 13h, and the program is specifically tailored for creating sprites for this mode.
+
+There is still a problem, however. The most modern image format Deluxe Paint can support is PCX.
+
+*** From PCX to BMP
+PCX is not a very ideal image format for our purposes. Firstly, it is quite outdated, and secondly it is RLE encoded, which makes it slightly more complicated to decompress. This is easily fixed by a single line in the ~Makefile~, which uses the ~convert~ utility in order to convert each image from PCX to uncompressed BMP:
+#+BEGIN_SRC makefile
+convert -compress none assets/$(1).PCX out/assets/$(1).bmp
+#+END_SRC
+
+*** From BMP to Binary
+BMP is as simple as it gets with image formats. However, there are two problems:
+- BMP contains a header as well as palette information, which represents useless data for us. We want to conserve as much memory as we can.
+- The pixels are stored from left to right, from bottom to top. Having this representation would complicate the routines to draw sprites onto the screen.
+Thus, in the interest of saving space and preventing headaches, the files are all converted into a binary format. This happens in the next line of the Makefile:
+#+BEGIN_SRC makefile
+out/conv_asset.o out/assets/$(1).bmp out/assets/$(1).bin $(2) $(3)
+#+END_SRC
+This line calls a compiled C script, which can be found in ~src/assets/conv_asset.c~. Here is the most important part of the script, annotated:
+#+BEGIN_SRC c
+  struct BMPHeader head; // Creates a struct of type BMPHeader (defined earlier) to hold the header information
+
+  fread(&head, sizeof(head), 1, source); // Reads header information into the header struct
+
+  skip_bytes(head.offset-sizeof(head), source); // Goes to the part of the file where the pixel data is stored
+  
+
+  char out[height][width]; // Creates an array to hold the pixel data
+
+  // The next part reads from the BMP in the way that the data is stored
+  for(int i = height-1; i >= 0; i--){ // From bottom to top
+    for(int z = 0; z < width; z++){ //From left to right
+      out[i][z] = fgetc(source);
+    }
+  }
+  
+  // This part writes back to the new file, now stored in a more regular way
+  for(int i = 0; i < height; i++){ // From top to bottom
+    for(int z = 0; z < width; z++){ // From left to right
+      fputc(out[i][z], output);
+    }
+  }
+#+END_SRC
+*** Storing the sprites
+Finally the ~Makefile~ writes to the disk image, making the data available to be used in the game.
+#+BEGIN_SRC makefile
+cat out/assets/$(1).bin >> out/HD.img
+#+END_SRC
+** Extracting the palette
+The palette is extracted in a very similar way to how image data is extracted. However, this only has to be done once, due to how only a single palette is needed for all of the images. The relevant lines in the ~Makefile~ are the following:
+#+BEGIN_SRC makefile
+        gcc -o out/extract_palette.o src/assets/extract_palette.c
+	convert -compress none assets/PALETTE.PCX out/assets/PALETTE.bmp
+	out/extract_palette.o out/assets/PALETTE.bmp out/assets/palette.bin
+	cat out/assets/palette.bin >> out/HD.img
+#+END_SRC
+
+* Animations
+The only real animation in /Kapow/ is the bomb explosion animation, of which there can be a great number on the screen. The first part of this, is the storage of variables pertaining to each explosion.
+
+** Storing explosion variables
+The general structure of each stored explosion can be found in the ~game/var_locs.asm~ file. Here is the part of the file concerning this:
+#+BEGIN_SRC nasm
+%define explosion_state bomb_y+2*number_of_bombs ;n of explosions elements, 2 bytes per element, fixed point with 8 bit fraction
+%define explosion_x explosion_state+2*number_of_explosions ;n of explosions elements, 2 bytes
+%define explosion_y explosion_x+2*number_of_explosions	   ;n of explosions elements, 2 bytes
+%define explosion_start_index explosion_y+2*number_of_explosions ; 1 byte, contains the index of the first explosion that is still active
+%define explosion_end_index explosion_start_index+1		 ; 1 byte, contains the index of the position after the last one that should be rendered
+#+END_SRC
+
+** Creating explosions
+Practically all of the code related to the non-graphical parts of the explosions are in ~game/explosion.asm~. 
+
+The explosions are stored in a queue implemented using an array. If there is no more space in the queue, no explosions will be able to be added until an explosion finishes.
+#+BEGIN_SRC nasm
+; Starts an explosion animation where a bomb is
+; ax - bomb index
+explode_bomb:
+	push bp
+	mov bp, sp
+
+	push si
+	push di
+	push bx
+
+	
+	mov si, ax
+	
+	xor bx, bx
+	mov bl, [cs:explosion_end_index]
+	push bx
+	inc bl
+	mov ax, 0
+	cmp bl, number_of_explosions
+	cmove bx, ax
+	cmp bl, [cs:explosion_start_index]
+	pop bx
+	je expb_e
+
+	mov di, bx
+	
+	inc byte [cs:explosion_end_index]
+
+	cmp di, number_of_explosions-1
+	jne expb_c
+	mov byte [cs:explosion_end_index], 0
+
+expb_c:	
+
+	shl di, 1
+	shl si, 1
+	mov ax, [cs:bomb_x+si]
+	mov [cs:explosion_x+di], ax
+
+	mov ax, [cs:bomb_y+si]
+	mov [cs:explosion_y+di], ax
+
+	mov word [cs:explosion_state+di], 0
+
+
+expb_e:
+	pop bx
+	pop di
+	pop si
+	
+	mov sp, bp
+	pop bp
+	ret
+#+END_SRC
+As you might be able to tell, this subroutine takes a single index as parameter. This is because in order to initialize the position of the explosion, it will extract this data from the bomb in the array of bombs at that index.
+
+** Updating explosions
+
+Each tick, the explosion will also be updated. This is done by iterating through the array of explosions, and adding a the speed of the animations to each. The frame of each explosion is then calculated as the upper 8 bits explosion state (As this is a [[http://www-inst.eecs.berkeley.edu/~cs61c/sp06/handout/fixedpt.html][fixed-point integer]]). Finally, if the explosion has run through all of its frames, it is terminated. The related code is as follows:
+#+BEGIN_SRC nasm
+update_explosion:
+	push bp
+	mov bp, sp
+
+	xor bx, bx
+	mov bl, [cs:explosion_start_index]
+	mov di, bx
+
+	xor cx, cx
+	mov cl, [cs:explosion_end_index]
+
+up_ex_l:
+	cmp di, cx
+	je up_ex_e
+
+	shl di, 1
+
+	mov ax, [cs:explosion_state+di]
+	add ax, explosion_speed
+	cmp ax, explosion_frames << 8
+	jb up_ex_c
+	mov ax, 0
+	inc byte [cs:explosion_start_index]
+	xor dx, dx
+	mov dl, [cs:explosion_start_index]
+	cmp dl, number_of_explosions
+	jne up_ex_c
+	mov byte [cs:explosion_start_index], 0
+up_ex_c:
+	mov [cs:explosion_state+di], ax
+	shr di, 1
+	
+	inc di
+	cmp di, number_of_explosions
+	jne up_ex_l
+	mov di, 0
+	jmp up_ex_l
+
+
+up_ex_e:	
+	mov sp, bp
+	pop bp
+	ret
+
+#+END_SRC
+
+** Drawing explosions
+The code for drawing the explosions is simple. The program simply iterates through the queue and draws each explosion at its respective location in the correct frame. The code for this resides in ~game/renderer.asm~ and looks as follows:
+
+#+BEGIN_SRC nasm
+render_explosions:
+	push bp
+	mov bp, sp
+
+	xor ax, ax
+	mov al, [cs:explosion_start_index]
+	xor di, di
+	mov di, ax 		; di contains start index
+
+	xor cx, cx
+	mov cl, [cs:explosion_end_index] ; cx contains end index
+
+
+r_ex_l:
+	cmp di, cx
+	je r_ex_e
+
+	
+	
+	push cx
+	push di
+
+	shl di, 1		; Multiply di by 2
+
+	mov dx, bomb_width*bomb_height
+	mov ax, [cs:explosion_state+di]
+	shr ax, 8
+	mul dx
+	mov dx, expls_loc
+	add dx, ax
+
+	mov ax, [cs:explosion_y+di]
+	shr ax, 4
+	mov bx, [cs:explosion_x+di]
+	mov ch, bomb_width
+	mov cl, bomb_height
+	call draw_sprite
+
+	pop di
+	pop cx
+
+	
+	inc di
+	
+	cmp di, number_of_explosions
+	jne r_ex_l
+	mov di, 0		; di has reached the end of the array, it has to loop around
+	jmp r_ex_l
+	
+	
+r_ex_e:
+	mov sp, bp
+	pop bp
+	ret
+
+#+END_SRC

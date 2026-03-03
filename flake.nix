@@ -1,8 +1,9 @@
+
 {
   description = "Org-mode blog built with Emacs";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    nixpkgs.url = "flake:nixpkgs";
     flake-utils.url = "github:numtide/flake-utils";
   };
 

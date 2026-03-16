@@ -1,5 +1,6 @@
 .packages/
 .org-timestamps/
+.generated/
 public/
 content/index.org
 *~

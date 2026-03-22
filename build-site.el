@@ -14,11 +14,31 @@
   (package-refresh-contents))
 
 ;; Install dependencies
-(package-install 'htmlize)
-(package-install 'ox-rss)
+(dolist (pkg '(htmlize ox-rss scala-mode nasm-mode))
+  (unless (package-installed-p pkg)
+    (package-install pkg)))
 
 ;; Load the publishing system
 (require 'ox-rss)
+(require 'scala-mode)
+(require 'nasm-mode)
+
+;; htmlize runs in batch mode here, so font-lock faces otherwise have no colors.
+;; Give code export a small fixed palette that works on the site's light code bg.
+(set-face-attribute 'font-lock-builtin-face nil :foreground "#5f3dc4" :weight 'bold)
+(set-face-attribute 'font-lock-comment-face nil :foreground "#6b7280" :slant 'italic)
+(set-face-attribute 'font-lock-constant-face nil :foreground "#0f766e" :weight 'bold)
+(set-face-attribute 'font-lock-doc-face nil :foreground "#7c3aed")
+(set-face-attribute 'font-lock-function-name-face nil :foreground "#005cc5" :weight 'bold)
+(set-face-attribute 'font-lock-keyword-face nil :foreground "#b42318" :weight 'bold)
+(set-face-attribute 'font-lock-negation-char-face nil :foreground "#b42318" :weight 'bold)
+(set-face-attribute 'font-lock-preprocessor-face nil :foreground "#9a3412" :weight 'bold)
+(set-face-attribute 'font-lock-regexp-grouping-backslash nil :foreground "#c2410c" :weight 'bold)
+(set-face-attribute 'font-lock-regexp-grouping-construct nil :foreground "#9a3412" :weight 'bold)
+(set-face-attribute 'font-lock-string-face nil :foreground "#0a7f3f")
+(set-face-attribute 'font-lock-type-face nil :foreground "#7c2d12" :weight 'bold)
+(set-face-attribute 'font-lock-variable-name-face nil :foreground "#1d4ed8")
+(set-face-attribute 'font-lock-warning-face nil :foreground "#c81e1e" :weight 'bold)
 
 ;; Disable timestamp caching (needed for sandboxed builds like nix)
 (setq org-publish-use-timestamps-flag nil)

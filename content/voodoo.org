@@ -1,5 +1,5 @@
 #+TITLE: Building an FPGA 3dfx Voodoo with Modern RTL Tools
-#+DATE: <2026-03-23>
+#+DATE: <2026-03-22>
 #+OPTIONS: toc:t num:nil
 
 [[file:assets/screamer2_sim.png]]

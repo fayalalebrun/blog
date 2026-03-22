@@ -551,8 +551,32 @@ img.pixelated {
     font-size: 0.83rem;
 }
 
+#header nav li.rss-nav-item {
+    display: flex;
+    align-items: center;
+}
+
 #header nav a {
     text-decoration: underline;
+}
+
+#header nav a.rss-link {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    line-height: 1;
+}
+
+#header nav a.rss-link svg {
+    width: 0.9rem;
+    height: 0.9rem;
+    display: block;
+    fill: currentColor;
+    stroke: currentColor;
+    stroke-width: 1.8;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    flex: 0 0 auto;
 }
 
 #table-of-contents {

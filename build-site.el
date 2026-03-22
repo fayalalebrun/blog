@@ -27,7 +27,10 @@
 ;; Customize the HTML output
 (setq org-html-validation-link nil            ;; Don't show validation link
       org-html-head-include-scripts nil       ;; Use our own scripts
-      org-html-head-include-default-style nil) ;; Use our own styles
+      org-html-head-include-default-style nil  ;; Use our own styles
+      org-html-metadata-timestamp-format "%Y-%m-%d")
+
+(setq org-export-date-timestamp-format "%Y-%m-%d")
 
 (defun getenv-default (name fallback)
   (let ((value (getenv name)))

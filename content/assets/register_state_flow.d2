@@ -1,0 +1,121 @@
+direction: down
+
+classes: {
+  stage: {
+    shape: rectangle
+    style: {
+      fill: "#EAF2FF"
+      stroke: "#334155"
+      shadow: true
+    }
+  }
+
+  queue: {
+    shape: rectangle
+    style: {
+      fill: "#DBEAFE"
+      stroke: "#1D4ED8"
+      shadow: true
+    }
+  }
+
+  launch: {
+    shape: hexagon
+    style: {
+      fill: "#FDE68A"
+      stroke: "#92400E"
+      shadow: true
+    }
+  }
+
+  barrier: {
+    shape: rectangle
+    style: {
+      fill: "#FFEDD5"
+      stroke: "#C2410C"
+      stroke-width: 3
+    }
+  }
+
+  note: {
+    shape: rectangle
+    style: {
+      fill: "#F8FAFC"
+      stroke: "#64748B"
+    }
+  }
+}
+
+pci: "PCI / register interface"
+fifo: "Write FIFO / queue"
+launch_pt: "triangleCmd /\nftriangleCmd"
+rast: "Rasterizer /\ngradient walker"
+tmu: "Texture mapping unit"
+comb: "Color combine /\nalpha / fog"
+fb: "Framebuffer interface"
+bar: "Drain barrier\n(pipeline must be idle)"
+
+pci.class: stage
+fifo.class: queue
+launch_pt.class: launch
+rast.class: stage
+tmu.class: stage
+comb.class: stage
+fb.class: stage
+bar.class: barrier
+
+pci -> fifo
+
+fifo -> launch_pt: "fifoSync\nstate captured with work" {
+  style: {
+    stroke: "#1D4ED8"
+    stroke-width: 3
+  }
+}
+
+launch_pt -> rast -> tmu -> comb -> fb {
+  style: {
+    stroke: "#1D4ED8"
+    stroke-width: 3
+  }
+}
+
+fifo -> bar: "fifoNoSync\nwait for drain" {
+  style: {
+    stroke: "#C2410C"
+    stroke-dash: 6
+    stroke-width: 3
+  }
+}
+
+bar -> rast: "apply directly" {
+  style: {
+    stroke: "#C2410C"
+    stroke-dash: 6
+    stroke-width: 3
+  }
+}
+
+bar -> tmu {
+  style: {
+    stroke: "#C2410C"
+    stroke-dash: 6
+    stroke-width: 3
+  }
+}
+
+bar -> comb {
+  style: {
+    stroke: "#C2410C"
+    stroke-dash: 6
+    stroke-width: 3
+  }
+}
+
+bar -> fb {
+  style: {
+    stroke: "#C2410C"
+    stroke-dash: 6
+    stroke-width: 3
+  }
+}

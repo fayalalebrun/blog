@@ -1,0 +1,138 @@
+#+TITLE: Building an FPGA 3dfx Voodoo with Modern RTL Tools
+#+DATE: <2026-03-23>
+#+OPTIONS: toc:t num:nil
+
+[[file:assets/screamer2_sim.png]]
+
+This frame of /Screamer 2/ was rendered not by an original 3dfx card and not by an emulator, but by an FPGA reimplementation of the Voodoo 1 that I wrote in SpinalHDL. Available on [[https://github.com/fayalalebrun/SpinalVoodoo][GitHub]].
+
+What surprised me was not just that it worked. It was that a design like this can now be described, simulated, and debugged by one person, provided the tools let you express the architecture directly and inspect execution at the right level of abstraction.
+
+The Voodoo 1 is old, but it is not simple. It has no transform-and-lighting hardware and no programmable shaders, so all of its graphics behavior is fixed in silicon: gradients for Gouraud shading, texture sampling, mipmapping, bilinear and trilinear filtering, alpha clipping, clipping, depth testing, fog, and more. A modern GPU concentrates much of its complexity in flexible programmable units. The Voodoo concentrates it in a large number of hardwired rendering behaviors.
+
+One of the bugs that drove this home looked at first like a framebuffer hazard. Small clusters of partially translucent text and overlay pixels would go mysteriously transparent, even though most of the frame looked fine. The real issue turned out not to be one broken subsystem, but several small hardware-accuracy mismatches stacking up in exactly the wrong way. That bug ended up being a good summary of the whole project: the hard part was not "making triangles appear." It was matching the Voodoo's exact behavior closely enough that the wrong pixels stopped appearing.
+
+This post is about the two abstractions that made that tractable. The first is how I represented the Voodoo's register semantics in SpinalHDL. The second is how I debugged a deep graphics pipeline using netlist-aware waveform queries in [[https://conetrace.com/][conetrace]].
+
+* A Fixed-Function Chip That Is Harder Than It Looks
+
+At first glance, the Voodoo looks almost modest. It is a memory-mapped accelerator with one job: render triangles as quickly as possible. Unlike later accelerators, it does not do transform and lighting, which means the host CPU handles the heavier 3D math.
+
+That can make the hardware sound simpler than it really is. Even a single triangle may involve interpolated colors, texture sampling, mip level selection, bilinear or trilinear filtering, alpha clipping, depth comparison, clipping, and fog. None of these operations are programmable in the modern sense. They are all baked into the silicon.
+
+That is the central contrast. In modern GPUs, complexity often comes from flexibility. In the original Voodoo, complexity comes from how many rendering behaviors are directly encoded in fixed-function hardware.
+
+* Why Register Writes Cannot All Behave the Same Way
+
+That fixed-function style shows up clearly in the register interface.
+
+On the Voodoo, writing to `triangleCmd` or `ftriangleCmd` launches a triangle. The other registers in the register bank describe how that triangle should be rasterized: which gradients to use, how textures should be sampled, which tests should run, and so on.
+
+The catch is that the Voodoo is deeply pipelined. Rendering a pixel involves a series of stages: stepping gradients, sampling textures, combining colors, comparing against the depth buffer, and more. Pipelining slices that work into stages so multiple pixels can be in flight at once. That is how the chip achieves throughput that software cannot match.
+
+#+CAPTION: The hard part is deciding which register writes may apply immediately, which must move with in-flight work, and which must wait until the pipeline is empty.
+#+ATTR_HTML: :width 500rem
+[[file:assets/register_state_flow.png]]
+
+But pipelining creates a problem for the register model. Imagine triangle A is still moving through the pipeline while the CPU starts configuring triangle B. If a rendering setting changes too early, late pixels from triangle A may see state intended for triangle B. The result is subtle corruption: part of a triangle rendered with the wrong texture mode, wrong blending mode, or wrong depth behavior.
+
+There are only two ways around that. Either a register write waits until the pipeline has drained before taking effect, or the write travels forward in step with the in-flight work so each triangle sees the state that belongs to it. In other words, register writes on the Voodoo are not just configuration updates. They are part of the timing contract of the machine.
+
+* The Voodoo's Four Register Behaviors
+
+In my model, Voodoo registers fall into four categories:
+
+| Type         | Behavior                                                      |
+|--------------+---------------------------------------------------------------|
+| FIFO         | Enqueued and applied in order                                 |
+| FIFO + Stall | Enqueued, but only applied once the pipeline has drained      |
+| Direct       | Applied immediately                                           |
+| Float        | Converted, then written to the fixed-point form of a register |
+
+The important point is that these categories are architectural, not just software-facing. A register type tells you whether a piece of state can change immediately, whether it must move with in-flight work, or whether it must wait for the machine to become quiescent.
+
+#+CAPTION: Why the register categories exist at all: without them, new state can bleed into old work.
+#+ATTR_HTML: :width 70%
+[[file:assets/texture_state_timing.svg]]
+
+That distinction turns out to be a very natural thing to model directly in the HDL.
+
+* Encoding Register Semantics in SpinalHDL
+
+The Voodoo has 430 configuration fields spread across many registers, with each register belonging to one of those categories. In a traditional HDL like Verilog, the difference between these register types usually ends up spread across several places: the register declarations, the bus-side control logic, the pipeline-side handling, and whatever external documentation describes the map.
+
+SpinalHDL has a useful abstraction here called `RegIf`. It lets you declare registers naturally and generates much of the surrounding control logic for you. I extended it so that a register declaration could directly encode Voodoo-specific semantics such as FIFO behavior, synchronized writes, and float aliases.
+
+For example:
+
+#+BEGIN_SRC scala
+val startR = busif
+  .newRegAtWithCategory(0x020, "startR", RegisterCategory.fifoNoSync)
+  .field(AFix.SQ(24 bits, 12 bits), AccessType.WO, 255 << 12, "Starting red value")
+  .withFloatAlias()
+  .asOutput()
+#+END_SRC
+
+This declares the starting R value used by the gradient walker. In one place it specifies the address, name, category, data type, access mode, reset value, and the presence of a floating-point alias. Elsewhere in the design, `startR` simply appears as a normal signal.
+
+The float alias is particularly useful here. The original Voodoo exposes a second register 128 addresses above the fixed-point one which accepts a floating-point write and converts it before storing the result in the fixed-point register. That behavior is part of the register interface itself, so it made sense to represent it there rather than scatter the logic elsewhere.
+
+Because the register metadata is explicit, `RegIf` can also export the map to other formats such as headers or SystemRDL. In my case I additionally use that metadata to drive a `PciFifo` component that emulates the Voodoo's register semantics. FIFO-style writes are queued. Synchronized writes stall until the pipeline is empty. Float aliases are routed through a float-to-fixed converter and then rewritten to the original address before they enter the queue.
+
+The gain here is not just fewer lines of code. It is that the architectural meaning of a register lives in one place. Instead of just being documentation, the register map is an executable description of how the machine behaves.
+
+* Querying Execution Instead of Scrolling Waveforms
+
+Describing the design is only half of RTL work. The other half is debugging it.
+
+The bug that really sold me on this workflow showed up in translucent overlays and text. Most of the frame looked correct, but small clusters of pixels would go mysteriously missing. Because destination-color blending reads the existing framebuffer value, the obvious theory was a memory-ordering bug: a stale read, a read/write hazard, or perhaps the new fill cache occasionally returning old data.
+
+#+CAPTION: Hardware (Mine, left) vs reference (86Box, right). The symptom looked like a framebuffer hazard: a few blended overlay pixels would be lost while most of the frame remained correct.
+#+ATTR_HTML: :class pixelated :width 70%
+[[file:assets/voodoo_bug.png]]
+
+That theory was plausible enough that I chased it hard. I changed write priority, added a true direct no-cache path, and compared alternate-buffer reads. The artifact barely moved. That was the twist. It looked like a framebuffer hazard, but the evidence kept refusing to line up with that explanation.
+
+This was where a netlist-aware trace helped much more than a conventional waveform viewer. Instead of staring at a large set of signals and manually aligning them across time, I used /conetrace/ to follow the failing pixels stage by stage through the rasterizer, the TMU, the color-combine logic, and finally the framebuffer output. Once I could trace the suspect pixels end to end, the cache theory collapsed: the wrongness was already present before the framebuffer path could plausibly explain it.
+
+#+BEGIN_SRC
+core_1.rasterizer_1.o @ cycle 5241000 payload={x: 396, y: 189, W: 1.972412, S: 124.492, T: 57.031}
+# ref: {x: 396, y: 189, W: 1.972427, S: 124.492, T: 57.031}
+# same fragment enters both paths
+# tiny W precision loss is already present
+-> core_1.tmu_1.io_output @ cycle 5241001 payload={S': 63.469, T': 13.984, lod: 0, texel: 0x58}
+# ref: {S': 63.492, T': 14.031, lod: 1, texel: 0x6B}
+# FIRST DIVERGENCE
+# perspective rounding / per-pixel LOD differs here
+-> core_1.fbAccess.read @ cycle 5241002 payload={dst565: 0x4A29}
+# ref: {dst565: 0x4A29}
+# framebuffer read matches exactly
+# cache theory ruled out here
+-> core_1.colorCombine_1.o @ cycle 5241002 payload={src: 0x56C9, dst_blend: 0x4A29, out: 0x39E7}
+# ref: {src: 0x5A8C, dst_blend: 0x49E7, out: 0x4A69}
+# second divergence
+# reference blend math effectively uses dither-subtracted destination color
+-> core_1.writeColor.i_fromPipeline @ cycle 5241003 payload={final565: 0x39E7}
+# ref: {final565: 0x4A69}
+# visible symptom: RTL lands much darker than the reference
+#+END_SRC
+
+The real issue was not one catastrophically broken block. It was a stack of small hardware-accuracy mismatches that only became visible together.
+
+The first problem was precision. Float-triangle `W` was being quantized too early as it passed through the TMU path. The second was that perspective texcoord rounding and per-pixel LOD adjustment were slightly off near mip boundaries. The third was in blending: I was using the expanded destination color for blend-factor math, but real Voodoo behavior effectively wants the dither-subtracted destination color instead.
+
+Each of those behaviors was almost right in isolation. Together, on exactly the right class of blended textured primitives, they produced visibly wrong pixels. That is why the bug felt random. Most of the frame was fine, and even the failing path was only wrong in a narrow corner of the state space.
+
+The fix was to stop arguing from the first plausible theory and instead match the machine stage by stage. I preserved wider `W`, `S`, and `T` accumulators, corrected the perspective rounding and LOD math, and fed dither-subtracted destination color into the blend-factor computation. Once those details matched the reference behavior, the "memory-ordering bug" disappeared, because it had never been a memory-ordering bug at all.
+
+A conventional waveform viewer can show every signal involved here, but it leaves most of the reconstruction to the engineer. A netlist-aware query tool moves some of that reconstruction into the tooling itself. On a design like the Voodoo, that difference is the gap between a plausible theory and an actual explanation.
+
+* What Modern RTL Tools Actually Changed
+
+The Voodoo 1 is not simple because it is old. It is difficult in a very specific way: its behavior is fixed in silicon, so much of the complexity lives in control paths, register semantics, and pipeline timing rather than in programmability.
+
+What modern RTL tools changed for me was not the amount of complexity in the design. They changed how much of that complexity I had to hold in my head at once.
+
+SpinalHDL let me encode architectural intent directly in the source instead of scattering it across declarations, bus logic, and documentation. Conetrace let me inspect execution in terms closer to the structure of the design than a raw waveform usually allows.
+
+That combination is what made an FPGA reimplementation of the Voodoo feel tractable for one person. The machine is still complicated. But with the right abstractions, more of that complexity becomes representable, queryable, and therefore manageable.

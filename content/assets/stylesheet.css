@@ -324,7 +324,7 @@ html {
 
 body {
     margin: 0 auto;
-    max-width: 92ch;
+    max-width: min(100%, 1400px);
     padding: 0.9rem 1rem 2rem;
     font-size: 1.05rem;
     line-height: 1.62;
@@ -437,7 +437,7 @@ ul,
 ol {
     margin-top: 0.75rem;
     margin-bottom: 0.75rem;
-    max-width: 68ch;
+    max-width: none;
     hyphens: auto;
 }
 
@@ -514,6 +514,11 @@ img {
     margin: 0 auto;
     max-width: 100%;
     height: auto;
+}
+
+img.pixelated {
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
 }
 
 #header {

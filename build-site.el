@@ -111,6 +111,12 @@
             :url (content-file-to-url file)
             :time (org-time-string-to-time date)))))
 
+(defun content-org-file-p (file)
+  (let ((name (file-name-nondirectory file)))
+    (and (string-suffix-p ".org" name)
+         (not (string-prefix-p "." name))
+         (not (string-prefix-p ".#" name)))))
+
 (defun format-feed-entry (post)
   (format (concat "* %s\n"
                   ":PROPERTIES:\n"
@@ -133,8 +139,9 @@
                  (mapcar #'collect-post-metadata
                          (cl-remove-if
                           (lambda (file)
-                            (member (file-name-nondirectory file)
-                                    '("index.org")))
+                            (or (member (file-name-nondirectory file)
+                                        '("index.org"))
+                                (not (content-org-file-p file))))
                           (directory-files-recursively content-directory "\\.org$")))
                  (lambda (left right)
                    (time-less-p (plist-get right :time)
@@ -172,10 +179,11 @@
 ;; Define the publishing project
 (setq org-publish-project-alist
       (list
-       (list "org-site:main"
+        (list "org-site:main"
              :recursive t
              :base-directory "./content"
              :publishing-function 'org-html-publish-to-html
+             :exclude "^\\.|/\\."
              :publishing-directory "./public"
              :with-author nil
 	     :with-date t

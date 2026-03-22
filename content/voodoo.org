@@ -95,27 +95,49 @@ That theory was plausible enough that I chased it hard. I changed write priority
 
 This was where a netlist-aware trace helped much more than a conventional waveform viewer. Instead of staring at a large set of signals and manually aligning them across time, I used /conetrace/ to follow the failing pixels stage by stage through the rasterizer, the TMU, the color-combine logic, and finally the framebuffer output. Once I could trace the suspect pixels end to end, the cache theory collapsed: the wrongness was already present before the framebuffer path could plausibly explain it.
 
-#+BEGIN_SRC
-core_1.rasterizer_1.o @ cycle 5241000 payload={x: 396, y: 189, W: 1.972412, S: 124.492, T: 57.031}
-# ref: {x: 396, y: 189, W: 1.972427, S: 124.492, T: 57.031}
-# same fragment enters both paths
-# tiny W precision loss is already present
--> core_1.tmu_1.io_output @ cycle 5241001 payload={S': 63.469, T': 13.984, lod: 0, texel: 0x58}
-# ref: {S': 63.492, T': 14.031, lod: 1, texel: 0x6B}
-# FIRST DIVERGENCE
-# perspective rounding / per-pixel LOD differs here
--> core_1.fbAccess.read @ cycle 5241002 payload={dst565: 0x4A29}
-# ref: {dst565: 0x4A29}
-# framebuffer read matches exactly
-# cache theory ruled out here
--> core_1.colorCombine_1.o @ cycle 5241002 payload={src: 0x56C9, dst_blend: 0x4A29, out: 0x39E7}
-# ref: {src: 0x5A8C, dst_blend: 0x49E7, out: 0x4A69}
-# second divergence
-# reference blend math effectively uses dither-subtracted destination color
--> core_1.writeColor.i_fromPipeline @ cycle 5241003 payload={final565: 0x39E7}
-# ref: {final565: 0x4A69}
-# visible symptom: RTL lands much darker than the reference
-#+END_SRC
+#+BEGIN_EXPORT html
+<div class="trace-panel">
+  <input class="trace-state" type="radio" name="trace-note" id="trace-note-1" checked>
+  <input class="trace-state" type="radio" name="trace-note" id="trace-note-2">
+  <input class="trace-state" type="radio" name="trace-note" id="trace-note-3">
+  <input class="trace-state" type="radio" name="trace-note" id="trace-note-4">
+  <input class="trace-state" type="radio" name="trace-note" id="trace-note-5">
+  <div class="trace-panel-output">
+    <div class="trace-panel-title">Terminal</div>
+    <div class="trace-screen">
+      <pre><code><span class="trace-line-command">$ conetrace rv path core_1.rasterizer_1.o core_1.writeColor.i_fromPipeline --track 5241000</span><label class="trace-line" for="trace-note-1"><span class="trace-badge">1</span>core_1.rasterizer_1.o @ cycle 5241000 payload={x: 396, y: 189, W: 1.972412, S: 124.492, T: 57.031}</label><label class="trace-line" for="trace-note-2"><span class="trace-badge">2</span>-&gt; core_1.tmu_1.io_output @ cycle 5241001 payload={S': 63.469, T': 13.984, lod: 0, texel: 0x58}</label><label class="trace-line" for="trace-note-3"><span class="trace-badge">3</span>-&gt; core_1.fbAccess.read @ cycle 5241002 payload={dst565: 0x4A29}</label><label class="trace-line" for="trace-note-4"><span class="trace-badge">4</span>-&gt; core_1.colorCombine_1.o @ cycle 5241002 payload={src: 0x56C9, dst_blend: 0x4A29, out: 0x39E7}</label><label class="trace-line" for="trace-note-5"><span class="trace-badge">5</span>-&gt; core_1.writeColor.i_fromPipeline @ cycle 5241003 payload={final565: 0x39E7}</label></code></pre>
+    </div>
+  </div>
+  <div class="trace-panel-side">
+    <div class="trace-panel-title">Annotation</div>
+    <div class="trace-note-card trace-note-card-1">
+      <strong>1. Rasterizer</strong>
+      <p>Same fragment enters both paths; the tiny <code>W</code> precision loss is already present.</p>
+      <p><code>ref: {x: 396, y: 189, W: 1.972427, S: 124.492, T: 57.031}</code></p>
+    </div>
+    <div class="trace-note-card trace-note-card-2">
+      <strong>2. First divergence</strong>
+      <p>Perspective rounding and per-pixel LOD already differ in the TMU path.</p>
+      <p><code>ref: {S': 63.492, T': 14.031, lod: 1, texel: 0x6B}</code></p>
+    </div>
+    <div class="trace-note-card trace-note-card-3">
+      <strong>3. Framebuffer read</strong>
+      <p>Destination color matches exactly, which rules out the cache theory.</p>
+      <p><code>ref: {dst565: 0x4A29}</code></p>
+    </div>
+    <div class="trace-note-card trace-note-card-4">
+      <strong>4. Second divergence</strong>
+      <p>The reference blend path effectively uses dither-subtracted destination color.</p>
+      <p><code>ref: {src: 0x5A8C, dst_blend: 0x49E7, out: 0x4A69}</code></p>
+    </div>
+    <div class="trace-note-card trace-note-card-5">
+      <strong>5. Visible symptom</strong>
+      <p>The RTL lands much darker than the reference by the final writeback.</p>
+      <p><code>ref: {final565: 0x4A69}</code></p>
+    </div>
+  </div>
+</div>
+#+END_EXPORT
 
 The real issue was not one catastrophically broken block. It was a stack of small hardware-accuracy mismatches that only became visible together.
 

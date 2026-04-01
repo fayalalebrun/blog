@@ -1,0 +1,25 @@
+#+TITLE: The Agent-Native Editor Was Invented in 1976
+#+DATE: <2026-04-01>
+#+OPTIONS: toc:t num:nil
+
+Integrating LLM completions and a chat UI does not make an editor agent-native. These features help users generate code with language models. But they miss the more important shift: coding agents have made bespoke software and custom tooling cheaper, faster, and easier than ever. Many so-called AI editors make this mistake twice over. They optimize for generating code inside closed, customization-limited products at exactly the moment when it has become easier than ever for programmers to customize their own tools.
+
+This era does not need an editor with better autocomplete. It needs an editor that is deeply extensible, introspectable, and programmable at runtime. An idea that is not new, but dates back to 1976.
+
+This is Emacs.
+
+Emacs is not merely an editor with an extension system. It is a live Lisp environment that happens to be an editor. Large parts of its behavior are implemented in Emacs Lisp, and that behavior can be inspected, modified, and re-evaluated while the editor is running. If generating small amounts of bespoke code is now cheap, then the important question is no longer whether an editor can be customized in principle. The important question is whether that customization can happen quickly, interactively, and against the live state of the editor you are actually using.
+
+As an example, recently I had the need to look into the Grafana repo. So I asked my agent to make me an Emacs-native menu for all of the common development actions in the repo. Within a few seconds, every action I needed for Grafana development was available in an Emacs-native menu. This type of highly-repo-specific Emacs customization was never too difficult. Now it is as easy as writing a five-word prompt.
+
+[[file:assets/emacs-transient.png]]
+
+In most software, extending behavior at this level would require either maintaining a fork or resorting to brittle hacks. In Emacs, the runtime is not sealed off from the user. That makes it easy for an agent to patch the system for a particular workflow.
+
+But easy extension is only half the story. The harder problem with agents is not just code generation, but closing the loop.
+
+Emacs has an answer here too. It can run as a long-lived server, with clients connecting to that running session. Those clients can open files, evaluate Emacs Lisp, and interact with the actual editor state rather than an inert copy on disk. This means an agent does not have to treat the editor as a black box. It can inspect buffers, query variables, invoke commands, patch functions, and observe the result in the live session where the work is actually happening. When something goes wrong, debugging becomes straightforward: inspect the editor state, inspect the changed functions, evaluate a fix, and try again. No GUI screenshots or fake clicks needed.
+
+This came in handy when I encountered performance issues with long-running ~agent-shell~ buffers. After a while Emacs would stutter every few seconds. I asked my agent to look into it, and it used ~emacsclient~ in order to inspect my running session. It then used the built-in ~profiler~ and ~list-timers~ commands to pinpoint the issue: one of the ~agent-shell~ timers was executing an expensive function to format the contents of its buffers. The fix—capping these buffers at a certain number of messages—was swiftly added and applied to my running editor using ~emacsclient~.
+
+That is why Emacs fits the age of agents so well. Emacs did not have AI before AI, but it was built around a model of software that plays to the strengths of agents. Its architecture assumes that users will want to reshape the editor from within, while it is running, for their own specific needs. That architecture did not change with the introduction of LLMs. What did change was the cost of taking advantage of it. Once personal software becomes cheap to build, the best editor is not the one with the best chat panel, but the one that is easiest to turn into your own.
